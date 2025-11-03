@@ -6,7 +6,9 @@ const db = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: {
         rejectUnauthorized: false
-    }
+    },
+
+    checkServerIdentity: () => undefined,
 });
 
 async function insertarRegistrosSacas(datos) {
