@@ -2,12 +2,18 @@ import {
     Pool
 } from 'pg';
 
-const db = new Pool({
+// Crear una única conexión global (reutilizable entre llamadas)
+let db;
+if (!global.db) {
+  global.db = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: {
-        rejectUnauthorized: false
-    }
-});
+      rejectUnauthorized: false,
+    },
+    max: 5, // opcional: limita cuántas conexiones simultáneas abre tu pool
+  });
+}
+db = global.db;
 
 async function insertarRegistrosSacas(datos) {
     //1. Insertar todas las sacas
@@ -19,6 +25,14 @@ async function insertarRegistrosSacas(datos) {
     if (!datos || datos.length === 0) {
         return [];
     }
+
+    //sincronizar los valores maximos de id_saca
+    await db.query(`
+      SELECT setval(
+        pg_get_serial_sequence('registro_saca', 'id_saca'),
+        (SELECT MAX(id_saca) FROM registro_saca)
+      );
+    `);
 
     datos.forEach((registro, index) => {
         values.push(registro.numero_saca);
@@ -43,6 +57,14 @@ async function insertarTrackings(datos) {
     if (!datos || datos.length === 0) {
         return;
     }
+
+    //sincronizar los valores maximos de id_tracking
+    await db.query(`
+         SELECT setval(
+            pg_get_serial_sequence('registro_tracking', 'id_tracking'),
+            (SELECT MAX(id_tracking) FROM registro_tracking)
+          );
+    `);
 
     datos.forEach((tracking) => {
         valores.push(tracking.id_saca, tracking.numero_tracking, tracking.ubicacion);
