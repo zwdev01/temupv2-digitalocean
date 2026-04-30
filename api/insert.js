@@ -14,6 +14,7 @@ if (!global.db) {
 
 db = global.db;
 
+
 // ---------------- DEBUG ----------------
 function debug(req, body, token) {
   console.log("========== DEBUG API ==========");
