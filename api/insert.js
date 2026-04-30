@@ -1,47 +1,50 @@
-import {
-    Pool
-} from 'pg';
+import { Pool } from 'pg';
 
-// Crear una única conexión global (reutilizable entre llamadas)
 let db;
 if (!global.db) {
   global.db = new Pool({
     connectionString: process.env.DATABASE_URL,
-    ssl: {
-      rejectUnauthorized: false,
-    },
-    max: 5, // opcional: limita cuántas conexiones simultáneas abre tu pool
+    ssl: { rejectUnauthorized: false },
+    max: 5,
   });
 }
 db = global.db;
 
-async function insertarRegistrosSacas(datos) {
-    //1. Insertar todas las sacas
-    //2. Retornar el id y el numero de saca de c/u
+// ---------------- DEBUG DEFINITIVO ----------------
+function debug(req, body, token) {
+    console.log("========== DEBUG API ==========");
+    console.log("METHOD:", req.method);
+    console.log("HEADERS:", req.headers);
+    console.log("AUTH HEADER:", token);
+    console.log("BODY TYPE:", typeof body);
+    console.log("BODY RAW:", body);
+    console.log("ACTION:", body?.action);
+    console.log("================================");
+}
+// --------------------------------------------------
 
+async function insertarRegistrosSacas(datos) {
     const values = [];
     const placeholders = [];
 
-    if (!datos || datos.length === 0) {
-        return [];
-    }
+    if (!datos || datos.length === 0) return [];
 
-    //sincronizar los valores maximos de id_saca
     await db.query(`
       SELECT setval(
         pg_get_serial_sequence('registro_saca', 'id_saca'),
-        (SELECT MAX(id_saca) FROM registro_saca)
+        (SELECT COALESCE(MAX(id_saca),1) FROM registro_saca)
       );
     `);
 
-    datos.forEach((registro, index) => {
-        values.push(registro.numero_saca);
-        placeholders.push(`($${index + 1})`);
+    datos.forEach((r, i) => {
+        values.push(r.numero_saca);
+        placeholders.push(`($${i + 1})`);
     });
 
     const query = `
         INSERT INTO registro_saca (numero_saca)
-        VALUES ${placeholders.join(', ')} RETURNING id_saca, numero_saca
+        VALUES ${placeholders.join(', ')}
+        RETURNING id_saca, numero_saca
     `;
 
     const result = await db.query(query, values);
@@ -49,118 +52,105 @@ async function insertarRegistrosSacas(datos) {
 }
 
 async function insertarTrackings(datos) {
-    //1. Insertar todas los trackings pasados por el request
     const valores = [];
-    const valueTuples = [];
-    let paramIndex = 1;
+    const tuples = [];
+    let i = 1;
 
-    if (!datos || datos.length === 0) {
-        return;
-    }
+    if (!datos || datos.length === 0) return;
 
-    //sincronizar los valores maximos de id_tracking
     await db.query(`
-         SELECT setval(
-            pg_get_serial_sequence('registro_tracking', 'id_tracking'),
-            (SELECT MAX(id_tracking) FROM registro_tracking)
-          );
+      SELECT setval(
+        pg_get_serial_sequence('registro_tracking', 'id_tracking'),
+        (SELECT COALESCE(MAX(id_tracking),1) FROM registro_tracking)
+      );
     `);
 
-    datos.forEach((tracking) => {
-        valores.push(tracking.id_saca, tracking.numero_tracking, tracking.ubicacion);
-        valueTuples.push(`($${paramIndex}, $${paramIndex + 1}, $${paramIndex + 2})`);
-        paramIndex += 3;
+    datos.forEach(t => {
+        valores.push(t.id_saca, t.numero_tracking, t.ubicacion);
+        tuples.push(`($${i}, $${i + 1}, $${i + 2})`);
+        i += 3;
     });
 
-    const query = `
-        INSERT INTO registro_tracking ("id_saca", "numero_tracking", "ubicacion")
-        VALUES ${valueTuples.join(', ')}
-    `;
-
-    await db.query(query, valores);
-
+    await db.query(`
+        INSERT INTO registro_tracking (id_saca, numero_tracking, ubicacion)
+        VALUES ${tuples.join(', ')}
+    `, valores);
 }
 
 async function ConsultarTrackingsReporte(fechaInicio, fechaFinal, estadosString) {
-    const estados = estadosString.split(',').map(e => e.trim()); // ["Pendiente", "Recibido"]
+    const estados = estadosString.split(',').map(e => e.trim());
 
-    const query = `
-        SELECT rt.numero_tracking,
-               rt.ubicacion,
-               rt.estado,
-               rt.fecha_recibido,
-               rt.fecha_entregado,
-               rt.fecha_devuelto,
-               rt.tipo_paquete,
-               rt.id_saca,
-               rs.numero_saca,
-               rs.fecha_creacion
+    const result = await db.query(`
+        SELECT rt.*, rs.numero_saca
         FROM registro_tracking rt
-                 INNER JOIN
-             registro_saca rs
-             ON
-                 rt.id_saca = rs.id_saca
+        INNER JOIN registro_saca rs ON rt.id_saca = rs.id_saca
         WHERE rs.fecha_creacion BETWEEN $1 AND $2
-          AND rt.estado = ANY ($3);
-    `;
+        AND rt.estado = ANY($3)
+    `, [fechaInicio, fechaFinal, estados]);
 
-    const values = [fechaInicio, fechaFinal, estados];
-
-    const result = await db.query(query, values);
     return result.rows;
 }
 
-
 export default async function handler(req, res) {
-    const {method, query, body} = req;
+    const { method, body } = req;
 
     const token = req.headers['authorization'];
 
+    // 🔥 PRUEBA DEFINITIVA (SIEMPRE SE EJECUTA)
+    debug(req, body, token);
+
+    // AUTH
     if (token !== `Bearer ${process.env.API_SECRET_TOKEN}`) {
-        return res.status(401).json({error: 'Unauthorized'});
+        return res.status(401).json({ error: 'Unauthorized' });
     }
 
     try {
+
+        // ---------------- HEALTH CHECK ----------------
+        if (method === 'GET') {
+            return res.status(200).json({
+                status: 'ok',
+                message: 'API funcionando correctamente'
+            });
+        }
+
+        // ---------------- POST ----------------
         if (method === 'POST') {
-            const {action, datos, referenciaId} = body;
+
+            const action = body?.action;
 
             if (action === 'InsertarSacas') {
-                const result = await insertarRegistrosSacas(datos);
-                return res.status(200).json({
-                    message: 'Registros sacas insertados correctamente',
-                    sacas: result
-                });
+                const result = await insertarRegistrosSacas(body.datos);
+                return res.json({ message: 'Sacas OK', data: result });
             }
 
             if (action === 'InsertarTracking') {
-                await insertarTrackings(datos);
-                return res.status(200).send('Insertados los trackings correctamente');
+                await insertarTrackings(body.datos);
+                return res.json({ message: 'Tracking OK' });
             }
 
             if (action === 'ConsultarTrackingsReporte') {
-                const fechaInicio = body.fechaInicio;
-                const fechaFinal = body.fechaFinal;
-                const estadosString = body.estadosString;
-                const result = await ConsultarTrackingsReporte(fechaInicio, fechaFinal, estadosString);
+                const result = await ConsultarTrackingsReporte(
+                    body.fechaInicio,
+                    body.fechaFinal,
+                    body.estadosString
+                );
 
-                return res.status(200).json({
-                    message: 'Registros para reporte obtenidos correctamente',
-                    trackings: result
-                });
+                return res.json({ message: 'Reporte OK', data: result });
             }
 
-
-            return res.status(400).json({error: 'Acción POST no reconocida'});
+            return res.status(400).json({
+                error: 'Acción POST no reconocida',
+                received: body
+            });
         }
 
-        if (method === 'GET') {
+        return res.status(405).json({ error: 'Método no permitido' });
 
-            return res.status(400).json({error: 'Acción GET no reconocida'});
-        }
-
-        res.status(405).end(`Método ${method} no permitido`);
     } catch (err) {
         console.error(err);
-        res.status(500).send('Error del servidor: ' + err.message);
+        return res.status(500).json({
+            error: err.message
+        });
     }
 }
