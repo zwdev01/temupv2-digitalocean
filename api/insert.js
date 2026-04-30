@@ -1,166 +1,163 @@
-import {
-    Pool
-} from 'pg';
+import { Pool } from 'pg';
 
-// Crear una única conexión global (reutilizable entre llamadas)
+// -------------------- DB --------------------
 let db;
+
 if (!global.db) {
   global.db = new Pool({
     connectionString: process.env.DATABASE_URL,
-    ssl: {
-      rejectUnauthorized: false,
-    },
-    max: 5, // opcional: limita cuántas conexiones simultáneas abre tu pool
+    ssl: { rejectUnauthorized: false },
+    max: 5,
   });
 }
+
 db = global.db;
 
+// -------------------- SACAS --------------------
 async function insertarRegistrosSacas(datos) {
-    //1. Insertar todas las sacas
-    //2. Retornar el id y el numero de saca de c/u
+  if (!datos || datos.length === 0) return [];
 
-    const values = [];
-    const placeholders = [];
+  const values = [];
+  const placeholders = [];
 
-    if (!datos || datos.length === 0) {
-        return [];
-    }
+  await db.query(`
+    SELECT setval(
+      pg_get_serial_sequence('registro_saca', 'id_saca'),
+      (SELECT COALESCE(MAX(id_saca), 1) FROM registro_saca)
+    );
+  `);
 
-    //sincronizar los valores maximos de id_saca
-    await db.query(`
-      SELECT setval(
-        pg_get_serial_sequence('registro_saca', 'id_saca'),
-        (SELECT MAX(id_saca) FROM registro_saca)
-      );
-    `);
+  datos.forEach((r, i) => {
+    values.push(r.numero_saca);
+    placeholders.push(`($${i + 1})`);
+  });
 
-    datos.forEach((registro, index) => {
-        values.push(registro.numero_saca);
-        placeholders.push(`($${index + 1})`);
-    });
+  const query = `
+    INSERT INTO registro_saca (numero_saca)
+    VALUES ${placeholders.join(', ')}
+    RETURNING id_saca, numero_saca
+  `;
 
-    const query = `
-        INSERT INTO registro_saca (numero_saca)
-        VALUES ${placeholders.join(', ')} RETURNING id_saca, numero_saca
-    `;
-
-    const result = await db.query(query, values);
-    return result.rows;
+  const result = await db.query(query, values);
+  return result.rows;
 }
 
+// -------------------- TRACKINGS --------------------
 async function insertarTrackings(datos) {
-    //1. Insertar todas los trackings pasados por el request
-    const valores = [];
-    const valueTuples = [];
-    let paramIndex = 1;
+  if (!datos || datos.length === 0) return;
 
-    if (!datos || datos.length === 0) {
-        return;
-    }
+  const valores = [];
+  const tuples = [];
+  let i = 1;
 
-    //sincronizar los valores maximos de id_tracking
-    await db.query(`
-         SELECT setval(
-            pg_get_serial_sequence('registro_tracking', 'id_tracking'),
-            (SELECT MAX(id_tracking) FROM registro_tracking)
-          );
-    `);
+  await db.query(`
+    SELECT setval(
+      pg_get_serial_sequence('registro_tracking', 'id_tracking'),
+      (SELECT COALESCE(MAX(id_tracking), 1) FROM registro_tracking)
+    );
+  `);
 
-    datos.forEach((tracking) => {
-        valores.push(tracking.id_saca, tracking.numero_tracking, tracking.ubicacion);
-        valueTuples.push(`($${paramIndex}, $${paramIndex + 1}, $${paramIndex + 2})`);
-        paramIndex += 3;
-    });
+  datos.forEach(t => {
+    valores.push(t.id_saca, t.numero_tracking, t.ubicacion);
+    tuples.push(`($${i}, $${i + 1}, $${i + 2})`);
+    i += 3;
+  });
 
-    const query = `
-        INSERT INTO registro_tracking ("id_saca", "numero_tracking", "ubicacion")
-        VALUES ${valueTuples.join(', ')}
-    `;
+  const query = `
+    INSERT INTO registro_tracking (id_saca, numero_tracking, ubicacion)
+    VALUES ${tuples.join(', ')}
+  `;
 
-    await db.query(query, valores);
-
+  await db.query(query, valores);
 }
 
+// -------------------- REPORTE --------------------
 async function ConsultarTrackingsReporte(fechaInicio, fechaFinal, estadosString) {
-    const estados = estadosString.split(',').map(e => e.trim()); // ["Pendiente", "Recibido"]
+  const estados = estadosString.split(',').map(e => e.trim());
 
-    const query = `
-        SELECT rt.numero_tracking,
-               rt.ubicacion,
-               rt.estado,
-               rt.fecha_recibido,
-               rt.fecha_entregado,
-               rt.fecha_devuelto,
-               rt.tipo_paquete,
-               rt.id_saca,
-               rs.numero_saca,
-               rs.fecha_creacion
-        FROM registro_tracking rt
-                 INNER JOIN
-             registro_saca rs
-             ON
-                 rt.id_saca = rs.id_saca
-        WHERE rs.fecha_creacion BETWEEN $1 AND $2
-          AND rt.estado = ANY ($3);
-    `;
+  const query = `
+    SELECT rt.*, rs.numero_saca, rs.fecha_creacion
+    FROM registro_tracking rt
+    INNER JOIN registro_saca rs ON rt.id_saca = rs.id_saca
+    WHERE rs.fecha_creacion BETWEEN $1 AND $2
+    AND rt.estado = ANY($3);
+  `;
 
-    const values = [fechaInicio, fechaFinal, estados];
+  const result = await db.query(query, [
+    fechaInicio,
+    fechaFinal,
+    estados
+  ]);
 
-    const result = await db.query(query, values);
-    return result.rows;
+  return result.rows;
 }
 
-
+// -------------------- HANDLER --------------------
 export default async function handler(req, res) {
-    const {method, query, body} = req;
+  const { method, body } = req;
 
-    const token = req.headers['authorization'];
+  // 🔥 1. HEALTH CHECK (AppSheet TEST)
+  if (method === 'GET') {
+    return res.status(200).json({
+      status: 'ok',
+      message: 'API conectada correctamente'
+    });
+  }
 
-    if (token !== `Bearer ${process.env.API_SECRET_TOKEN}`) {
-        return res.status(401).json({error: 'Unauthorized'});
+  // 🔐 AUTH
+  const token = req.headers['authorization'];
+
+  if (token !== `Bearer ${process.env.API_SECRET_TOKEN}`) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  try {
+    // -------------------- POST --------------------
+    if (method === 'POST') {
+
+      // 🔥 INSERT SACAS
+      if (req.url.includes('sacas')) {
+        const result = await insertarRegistrosSacas(body.datos);
+        return res.status(200).json({
+          message: 'Sacas insertadas',
+          data: result
+        });
+      }
+
+      // 🔥 INSERT TRACKINGS
+      if (req.url.includes('trackings')) {
+        await insertarTrackings(body.datos);
+        return res.status(200).json({
+          message: 'Trackings insertados'
+        });
+      }
+
+      // 🔥 REPORTE
+      if (req.url.includes('reporte')) {
+        const result = await ConsultarTrackingsReporte(
+          body.fechaInicio,
+          body.fechaFinal,
+          body.estadosString
+        );
+
+        return res.status(200).json({
+          message: 'Reporte generado',
+          data: result
+        });
+      }
+
+      return res.status(400).json({
+        error: 'Endpoint POST no reconocido'
+      });
     }
 
-    try {
-        if (method === 'POST') {
-            const {action, datos, referenciaId} = body;
+    return res.status(405).json({ error: 'Método no permitido' });
 
-            if (action === 'InsertarSacas') {
-                const result = await insertarRegistrosSacas(datos);
-                return res.status(200).json({
-                    message: 'Registros sacas insertados correctamente',
-                    sacas: result
-                });
-            }
-
-            if (action === 'InsertarTracking') {
-                await insertarTrackings(datos);
-                return res.status(200).send('Insertados los trackings correctamente');
-            }
-
-            if (action === 'ConsultarTrackingsReporte') {
-                const fechaInicio = body.fechaInicio;
-                const fechaFinal = body.fechaFinal;
-                const estadosString = body.estadosString;
-                const result = await ConsultarTrackingsReporte(fechaInicio, fechaFinal, estadosString);
-
-                return res.status(200).json({
-                    message: 'Registros para reporte obtenidos correctamente',
-                    trackings: result
-                });
-            }
-
-
-            return res.status(400).json({error: 'Acción POST no reconocida'});
-        }
-
-        if (method === 'GET') {
-
-            return res.status(400).json({error: 'Acción GET no reconocida'});
-        }
-
-        res.status(405).end(`Método ${method} no permitido`);
-    } catch (err) {
-        console.error(err);
-        res.status(500).send('Error del servidor: ' + err.message);
-    }
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({
+      error: 'Error servidor',
+      detail: err.message
+    });
+  }
 }
