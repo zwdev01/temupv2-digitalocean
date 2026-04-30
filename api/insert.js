@@ -4,12 +4,12 @@ let db;
 
 if (!global.db) {
   global.db = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: {
-      rejectUnauthorized: false, // 🔥 necesario para DigitalOcean en Vercel
-    },
-    max: 5,
-  });
+  connectionString: process.env.DATABASE_URL,
+  ssl: {
+    rejectUnauthorized: false
+  },
+  max: 5,
+});
 }
 
 db = global.db;
